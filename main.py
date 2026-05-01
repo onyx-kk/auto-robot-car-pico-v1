@@ -1,7 +1,7 @@
 from machine import Pin
 import time
 
-# 假设GPIO 0接超声波Trig，GPIO 1接Echo（只是示例）
+# 假设GPIO 0接超声波Trig，GPIO 1接Echo
 trig = Pin(0, Pin.OUT)
 echo = Pin(1, Pin.IN)
 
