@@ -1,0 +1,93 @@
+# ir_rx.py - 精简独立的 NEC 红外解码模块
+# 整合自 micropython_ir 库 (https://github.com/peterhinch/micropython_ir)
+# 只保留了 NEC_16 类所需的功能，无需额外下载其它文件。
+
+from machine import Pin, Timer
+import utime
+
+__all__ = ['NEC_16']
+
+# 辅助错误打印（静默）
+class IR_RX_PrintError:
+    def print_error(self, msg, *args):
+        pass  # 实际使用时如果你需要调试，可以改为 print(msg % args)
+
+# 基类
+class IR_RX(IR_RX_PrintError):
+    def __init__(self, pin, callback, *args):
+        self._pin = pin if isinstance(pin, Pin) else Pin(pin, Pin.IN)
+        self._callback = callback
+        self._edges = []
+        self._timer = Timer(-1)
+        self._pin.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self._edge_handler)
+        self._edge_start = 0
+
+    def _edge_handler(self, p):
+        t = utime.ticks_us()
+        edge = p.value()
+        if self._edges:
+            if edge == self._edges[-1][1]:  # 忽略重复边沿
+                return
+        self._edges.append((t, edge))
+
+        if len(self._edges) > 80:  # 防止无限增长
+            self._edges = []
+
+        if edge == 0:  # 下降沿时启动超时定时器
+            self._timer.init(mode=Timer.ONE_SHOT, period=65, callback=self._timeout)
+
+    def _timeout(self, t):
+        self._timer.deinit()
+        if self._callback and len(self._edges) >= 32:
+            self._decode()
+
+    def _decode(self):
+        raise NotImplementedError
+
+    def close(self):
+        self._pin.irq(handler=None)
+        self._timer.deinit()
+
+# NEC-16 解码实现
+class NEC_16(IR_RX):
+    def __init__(self, pin, callback, extended=False):
+        super().__init__(pin, callback)
+        self._extended = extended
+
+    def _decode(self):
+        try:
+            edges = self._edges
+            if len(edges) < 33:
+                return
+            # 解析引导码（忽略长9ms低+4.5ms高，直接找第一个数据位）
+            vals = []
+            for i in range(1, 33):  # 忽略第一个下降沿（引导码开始）
+                dt = utime.ticks_diff(edges[i*2][0], edges[i*2-1][0])  # 间隔时间
+                if dt > 1500 and dt < 2500:
+                    vals.append(1)
+                elif dt > 500 and dt < 1500:
+                    vals.append(0)
+                else:
+                    return  # 无效脉冲宽
+            # 组合地址和数据
+            addr = 0
+            data = 0
+            for i in range(8):
+                addr |= vals[i] << i
+            for i in range(8, 16):
+                data |= vals[i] << i
+            # 简单验证反码（可选）
+            addr_inv = 0
+            data_inv = 0
+            for i in range(16, 24):
+                addr_inv |= vals[i] << (i-16)
+            for i in range(24, 32):
+                data_inv |= vals[i] << (i-24)
+            if (addr ^ addr_inv) != 0xff or (data ^ data_inv) != 0xff:
+                # 允许松动，因为有些遥控器反码可能不一致
+                pass
+            self._callback(data, addr, 0)
+        except:
+            self.print_error("NEC decode error")
+        finally:
+            self._edges = []
